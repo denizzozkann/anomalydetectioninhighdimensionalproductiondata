@@ -168,7 +168,7 @@ space = [
 #Objective Function for K-means
 @use_named_args(space)
 def kmeans_objective(n_clusters):
-    # Apply K-Means with the current number of clusters
+    #Performing K-Means with the current number of clusters
     kmeans = KMeans(n_clusters=n_clusters, n_init=10, random_state=42)
     labels = kmeans.fit_predict(X_pca)
     
