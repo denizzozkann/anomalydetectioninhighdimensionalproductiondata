@@ -1,0 +1,202 @@
+import pandas as pd
+from sklearn.preprocessing import StandardScaler
+from sklearn.decomposition import PCA
+from sklearn.cluster import KMeans, DBSCAN, AgglomerativeClustering, OPTICS
+from sklearn.mixture import GaussianMixture
+import matplotlib.pyplot as plt
+import numpy as np
+from skopt import gp_minimize
+from skopt.space import Integer, Real
+from skopt.utils import use_named_args
+from sklearn.metrics import silhouette_score
+
+#Inserting the simulated production line dataset
+data_file = '/Users/denizozkan/Downloads/high_dimensional_dataset_with_anomalies_no_sensor_errors.csv'
+df = pd.read_csv(data_file)
+
+#Preparing the numerical columns to apply Principal Component Analysis (PCA)
+numerical_columns = [col for col in df.columns if df[col].dtype in ['float64', 'int64']]
+X = df[numerical_columns]
+scaler_data = StandardScaler()
+X_scaled = scaler_data.fit_transform(X)
+
+#Now the dataset is ready to apply PCA as below
+pca = PCA(n_components=2)  #The dataset dimension is reduced to 2 principal components for better visualization
+X_pca = pca.fit_transform(X_scaled)
+
+#PCA application is performed. The code will be applying clustering algorithms from now on and compare the results.
+#1.Anomaly Detection with K-Means
+kmeans = KMeans(n_clusters=3, n_init=10)
+kmeans.fit(X_pca)
+distances = kmeans.transform(X_pca).min(axis=1)
+threshold_kmeans = np.percentile(distances, 95)
+anomalies_kmeans = np.where(distances > threshold_kmeans)[0]
+
+#2.Anomaly Detection with DBSCAN
+dbscan = DBSCAN(eps=1.5, min_samples=5)
+labels_dbscan = dbscan.fit_predict(X_pca)
+anomalies_dbscan = np.where(labels_dbscan == -1)[0]
+
+#3.Anomaly Detection with Gaussian Mixture Model
+gmm = GaussianMixture(n_components=3)
+gmm.fit(X_pca)
+probs = gmm.predict_proba(X_pca).max(axis=1)
+threshold_gmm = np.percentile(probs, 5)
+anomalies_gmm = np.where(probs < threshold_gmm)[0]
+
+#4.Anomaly Detection with OPTICS
+optics = OPTICS(min_samples=5, xi=0.05, min_cluster_size=0.1)
+labels_optics = optics.fit_predict(X_pca)
+anomalies_optics = np.where(labels_optics == -1)[0]
+
+#Anomalies detected from all clustering methods put into a table below
+anomalies_table = pd.DataFrame({
+    "Method": ["K-Means"] * len(anomalies_kmeans) + 
+              ["DBSCAN"] * len(anomalies_dbscan) + 
+              ["GMM"] * len(anomalies_gmm) + 
+              ["OPTICS"] * len(anomalies_optics),
+    "Index": np.concatenate([anomalies_kmeans, anomalies_dbscan, anomalies_gmm, anomalies_optics]),
+    "PC1": np.concatenate([X_pca[anomalies_kmeans, 0], X_pca[anomalies_dbscan, 0], 
+                           X_pca[anomalies_gmm, 0], X_pca[anomalies_optics, 0]]),
+    "PC2": np.concatenate([X_pca[anomalies_kmeans, 1], X_pca[anomalies_dbscan, 1], 
+                           X_pca[anomalies_gmm, 1], X_pca[anomalies_optics, 1]])
+})
+
+print(anomalies_table)
+
+#Plotting the expected normal data results
+plt.figure(figsize=(12, 8))
+plt.scatter(X_pca[:, 0], X_pca[:, 1], c='gray', label='Normal Data')
+
+#Anomalies detected from all clustering methods are plotted together below
+plt.scatter(X_pca[anomalies_kmeans, 0], X_pca[anomalies_kmeans, 1], c='red', label='K-Means Anomalies', marker='o')
+plt.scatter(X_pca[anomalies_dbscan, 0], X_pca[anomalies_dbscan, 1], c='blue', label='DBSCAN Anomalies', marker='x')
+plt.scatter(X_pca[anomalies_gmm, 0], X_pca[anomalies_gmm, 1], c='green', label='GMM Anomalies', marker='s')
+plt.scatter(X_pca[anomalies_optics, 0], X_pca[anomalies_optics, 1], c='yellow', label='OPTICS Anomalies', marker='^')
+
+plt.xlabel('Principal Component 1')
+plt.ylabel('Principal Component 2')
+plt.title('Anomaly Detection Using Multiple Clustering Methods')
+plt.legend()
+plt.show()
+
+#Anomalies detected from all clustering methods are plotted seperately below
+methods = [
+    ("K-Means", anomalies_kmeans, 'red', 'o'),
+    ("DBSCAN", anomalies_dbscan, 'blue', 'x'),
+    ("GMM", anomalies_gmm, 'green', 's'),
+    ("OPTICS", anomalies_optics, 'yellow', '^')
+]
+
+for method_name, anomalies, color, marker in methods:
+    plt.figure(figsize=(8, 6))
+    plt.scatter(X_pca[:, 0], X_pca[:, 1], c='gray', label='Normal Data')
+    plt.scatter(X_pca[anomalies, 0], X_pca[anomalies, 1], c=color, label=f'{method_name} Anomalies', marker=marker)
+    plt.xlabel('Principal Component 1')
+    plt.ylabel('Principal Component 2')
+    plt.title(f'Anomaly Detection Using {method_name}')
+    plt.legend()
+    plt.show()
+
+#Below code is to check which of the features effect the PCA analysis by contributing the most
+loadings = pca.components_
+loadings_df = pd.DataFrame(loadings.T, columns=['PC1', 'PC2'], index=numerical_columns)
+pc1_contributions = loadings_df['PC1'].abs().sort_values(ascending=False)
+pc2_contributions = loadings_df['PC2'].abs().sort_values(ascending=False)
+top_pc1_features = pc1_contributions.head()
+top_pc2_features = pc2_contributions.head()
+print(top_pc1_features, top_pc2_features)
+
+
+#Bayesian Hyperparameter Optimization
+#OPTICS - Hyperparameter's Search Space Definition
+space = [
+    Integer(2, 20, name='min_samples'),
+    Real(0.01, 0.2, name='xi'), 
+    Real(0.05, 0.5, name='min_cluster_size')
+]
+
+#Objective Function for OPTICS
+@use_named_args(space)
+def optics_objective(min_samples, xi, min_cluster_size):
+    optics = OPTICS(min_samples=min_samples, xi=xi, min_cluster_size=min_cluster_size) #OPTICS algorithm with suggested parameters
+    labels = optics.fit_predict(X_pca)
+    
+    #-1 labels to calculate silhouette score
+    noise_free_labels = labels[labels != -1]
+    noise_free_points = X_pca[labels != -1]
+    
+    #There should be at least two clusters to calculate silhouette score
+    if len(set(noise_free_labels)) < 2:
+        return 1.0
+        
+    score = silhouette_score(noise_free_points, noise_free_labels)
+    return -score
+
+result = gp_minimize(optics_objective, space, n_calls=50, random_state=42)
+
+#Obtaining the best parameters
+best_min_samples = result.x[0]
+best_xi = result.x[1]
+best_min_cluster_size = result.x[2]
+print("Best Parameters:")
+print(f"min_samples: {best_min_samples}, xi: {best_xi}, min_cluster_size: {best_min_cluster_size}")
+
+#Performing OPTICS with the optimized parameters
+optimized_optics = OPTICS(min_samples=best_min_samples, xi=best_xi, min_cluster_size=best_min_cluster_size)
+optimized_labels = optimized_optics.fit_predict(X_pca)
+optimized_anomalies = np.where(optimized_labels == -1)[0]
+
+#OPTICS Clustering Results after Hyperparameter Tuning
+plt.figure(figsize=(8, 6))
+plt.scatter(X_pca[:, 0], X_pca[:, 1], c='gray', label='Normal Data', alpha=0.5)
+plt.scatter(
+    X_pca[optimized_anomalies, 0], X_pca[optimized_anomalies, 1],
+    c='yellow', label='OPTICS Anomalies', marker='^', edgecolors='black'
+)
+plt.xlabel('Principal Component 1')
+plt.ylabel('Principal Component 2')
+plt.title('Anomaly Detection Using Optimized OPTICS (Bayesian Optimization)')
+plt.legend()
+plt.show()
+
+#K-means - Hyperparameter's Search Space Definition
+space = [
+    Integer(2, 10, name='n_clusters')  #Optimize between 2 and 10 clusters
+]
+
+#Objective Function for K-means
+@use_named_args(space)
+def kmeans_objective(n_clusters):
+    # Apply K-Means with the current number of clusters
+    kmeans = KMeans(n_clusters=n_clusters, n_init=10, random_state=42)
+    labels = kmeans.fit_predict(X_pca)
+    
+    #Calculating the silhouette score
+    try:
+        score = silhouette_score(X_pca, labels)
+        return -score
+    except ValueError:
+        return 1.0
+        
+result = gp_minimize(kmeans_objective, space, n_calls=50, random_state=42)
+
+#Obtaining the best parameters
+best_n_clusters = result.x[0]
+print("Best Parameters:")
+print(f"n_clusters: {best_n_clusters}")
+
+#Performing K-Means clustering algorihm with the updated amount of clusters
+optimized_kmeans = KMeans(n_clusters=best_n_clusters, n_init=10, random_state=42)
+optimized_labels = optimized_kmeans.fit_predict(X_pca)
+
+#K-Means Clustering Results after Hyperparameter Tuning
+plt.figure(figsize=(8, 6))
+plt.scatter(X_pca[:, 0], X_pca[:, 1], c=optimized_labels, cmap='viridis', s=30, label='Clustered Data', alpha=0.7)
+centroids = optimized_kmeans.cluster_centers_
+plt.scatter(centroids[:, 0], centroids[:, 1], c='red', marker='X', s=200, label='Centroids')
+plt.xlabel('Principal Component 1')
+plt.ylabel('Principal Component 2')
+plt.title('Clustering Using Optimized K-Means (Bayesian Optimization)')
+plt.legend()
+plt.show()
